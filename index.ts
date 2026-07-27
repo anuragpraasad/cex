@@ -13,12 +13,40 @@ const prisma = new PrismaClient({ adapter });
 const app = express();
 app.use(express.json());
 
-const BALANCES = {};
+interface UserBalance  {
+  USD : {
+    "total" : number
+    "locked" : number,
+  },
+  Stocks : {
+    [ticker : string] : number
+  }
+}
+
+const BALANCES: Record<string,UserBalance> = {
+  "1" : {
+    USD : {
+      total : 36000,
+      locked : 100
+    },
+    Stocks : {
+      SOL : 23
+    }
+  }
+};
 
 const ORDERBOOKS = {
-  SOL: {},
-  BTC: {},
+  SOL: {
+    BIDS: {},
+    ASKS: {},
+  },
 };
+
+app.get("/getorderbook", (req, res) => {
+  return res.json({
+    orderbook: ORDERBOOKS,
+  });
+});
 
 app.post("/signup", async (req, res) => {
   const username = req.body.username;
@@ -98,8 +126,78 @@ app.post("/signin", async (req, res) => {
   }
 });
 
-app.post("/order", (req, res) => {
-  // TODO
+app.post("/post-stock", async (req, res) => {
+  const title = req.body.title;
+  const symbol = req.body.symbol;
+  try {
+    const stock = await prisma.stock.create({
+      data: {
+        title,
+        symbol,
+      },
+    });
+
+    return res.status(200).json({
+      status: 200,
+      msg: "Stock entered successfully",
+      stock: stock,
+    });
+  } catch (e) {
+    return res.status(400).json({
+      status: 400,
+      msg: "Error Occurred",
+    });
+  }
+});
+
+app.post("/order", authMiddleware, async (req, res) => {
+  const userId = req.userId;
+  const side = req.body.side;
+  const type = req.body.type;
+  const stockid = req.body.stockid;
+  const price = req.body.price;
+  const quantity = req.body.quantity;
+  const status = req.body.status;
+  const filledquantity = req.body.filledquantity;
+
+  if (!userId) {
+    return res.status(400).json({ msg: "Unauthorised" });
+  }
+
+  // ------------------------------------------------------------------------------------
+  // lock the balance
+  // check that the User has Sufficient Balance or not
+  const userBalance = BALANCES[userId.toString()]
+  if (!userBalance){
+    return res.json({
+      msg : "Balance is not availble"
+    })
+  }
+  const lockedBalance = price * quantity;
+  if(userBalance.USD["total"] < lockedBalance){
+    return res.json({
+      "msg" : "You have insifficient Balance"
+    })
+  }
+  userBalance.USD["locked"] -= lockedBalance;
+  // -------------------------------------------------------------------------------------------
+
+  // update the order db
+  const createdOrder = await prisma.order.create({
+    data: {
+      userId: userId,
+      side: side,
+      type: type,
+      stockid: stockid,
+      price: price,
+      quantity: quantity,
+      status: status,
+      filledquantity: filledquantity,
+    },
+  });
+
+  // update the orderbook
+
   res.status(200).json({ msg: "order created" });
 });
 

@@ -3,6 +3,21 @@
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
+enum Side {
+  BUY
+  SELL
+}
+
+enum Type {
+  LIMIT
+  MARKET
+}
+
+enum Status {
+  FILLED
+  UNFILLED
+}
+
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -19,10 +34,37 @@ model User {
   orders   Order[]
 }
 
+model Stock {
+  id     Int     @id @default(autoincrement())
+  title  String
+  symbol String
+  orders Order[]
+  fills  Fill[]
+}
+
+model Fill {
+  id          Int   @id @default(autoincrement())
+  stockid     Int
+  price       Int
+  buyorderid  Int
+  sellorderid Int
+  stock       Stock @relation(fields: [stockid], references: [id])
+  buyorders   Order @relation("Buyorders", fields: [buyorderid], references: [id])
+  sellordes   Order @relation("Sellorders", fields: [sellorderid], references: [id])
+}
+
 model Order {
-  id       Int    @id
-  userId   Int
-  market   String
-  quantity Int
-  user     User   @relation(fields: [userId], references: [id])
+  id             Int    @id @default(autoincrement())
+  userId         Int
+  quantity       Int
+  side           Side
+  type           Type
+  stockid        Int
+  price          Int
+  filledquantity Int
+  status         Status
+  buyFills       Fill[] @relation("Buyorders")
+  sellFills      Fill[] @relation("Sellorders")
+  user           User   @relation(fields: [userId], references: [id])
+  stock          Stock  @relation(fields: [stockid], references: [id])
 }
