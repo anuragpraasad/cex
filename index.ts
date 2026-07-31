@@ -286,13 +286,22 @@ app.post("/order", authMiddleware, async (req, res) => {
       ASKS: {},
     };
   }
+  type OrderType = "BIDS" | "ASKS" 
+  var otype : OrderType = "BIDS"
+  if (side === "BUY"){
+    otype = "BIDS"
+  }
+  else { 
+    otype = "ASKS"
+  }
   //safety cehck for the presence of price
-  if (!ORDERBOOK[stockid]["BIDS"][price]) {
-    ORDERBOOK[stockid]["BIDS"][price] = {
+  if (!ORDERBOOK[stockid][otype][price]) {
+    ORDERBOOK[stockid][otype][price] = {
       totalQuantity: 0,
       orders: [],
     };
   }
+  const currentPriceLevel  = ORDERBOOK[stockid][otype][price]!
 
   // 6. Update the in-memory Order Book with the new order.
   const newOrder = {
@@ -304,8 +313,8 @@ app.post("/order", authMiddleware, async (req, res) => {
   };
 
   //upddate the in memory ORDERBOOK
-  ORDERBOOK[stockid]["BIDS"][price]["totalQuantity"] += quantity;
-  ORDERBOOK[stockid]["BIDS"][price].orders.push(newOrder);
+  currentPriceLevel["totalQuantity"] += quantity;
+  currentPriceLevel.orders.push(newOrder);
   console.log(createdOrder);
   console.log("Updated the ORDERBOOK");
 
