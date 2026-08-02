@@ -286,14 +286,13 @@ app.post("/order", authMiddleware, async (req, res) => {
       ASKS: {},
     };
   }
-  type OrderType = "BIDS" | "ASKS" 
-  var otype : OrderType = "BIDS"
-  if (side === "BUY"){
-    otype = "BIDS"
-  }
-  else { 
-    otype = "ASKS"
-  }
+  type OrderType = "BIDS" | "ASKS";
+  type MarketType = "LIMIT" | "MARKET";
+  var otype: OrderType;
+  var mtype: MarketType;
+  otype = side === "BUY" ? "BIDS" : "ASKS";
+  mtype = type === "LIMIT" ? "LIMIT" : "MARKET";
+
   //safety cehck for the presence of price
   if (!ORDERBOOK[stockid][otype][price]) {
     ORDERBOOK[stockid][otype][price] = {
@@ -301,7 +300,46 @@ app.post("/order", authMiddleware, async (req, res) => {
       orders: [],
     };
   }
-  const currentPriceLevel  = ORDERBOOK[stockid][otype][price]!
+
+  if (otype == "BIDS" && mtype == "MARKET") {
+    const stockAsks = ORDERBOOK[stockid]["ASKS"];
+    if (Object.keys(stockAsks).length == 0) {
+      return res.json({
+        msg: "There is no ASKS for this " + ticker?.title,
+      });
+    }
+    const priceStrings = Object.keys(stockAsks);
+    let priceNumbers = priceStrings.map((price) => Number(price));
+    let remainingquantity = quantity; // quantity that the BIDS is wanting to sell
+    while (remainingquantity > 0 && priceNumbers.length > 0) {
+      const lowestAskPrice = Math.min(...priceNumbers);
+      const currentpricelevel = stockAsks[lowestAskPrice];
+      // individual order level
+      while (remainingquantity > 0 && currentpricelevel!.orders.length > 0) {
+        let currentorder = currentpricelevel!.orders[0];
+        let availableOrderQuantity =
+          currentorder!.quantity - currentorder!.filledQuantity;
+        if (remainingquantity >= availableOrderQuantity) {
+          // full order fill
+          remainingquantity -= availableOrderQuantity;
+          currentpricelevel!.totalQuantity -= availableOrderQuantity;
+          currentpricelevel!.orders.shift();
+        } else {
+          //partial order fill
+          currentorder!.filledQuantity += remainingquantity;
+          currentpricelevel!.totalQuantity -= remainingquantity;
+          remainingquantity = 0;
+        }
+      }
+      if (currentpricelevel!.orders.length === 0) {
+        priceNumbers = priceNumbers.filter((p) => p !== lowestAskPrice);
+        delete stockAsks[lowestAskPrice];
+      }
+    }
+    
+  }
+
+  const currentPriceLevel = ORDERBOOK[stockid][otype][price]!;
 
   // 6. Update the in-memory Order Book with the new order.
   const newOrder = {
@@ -311,6 +349,8 @@ app.post("/order", authMiddleware, async (req, res) => {
     orderId: createdOrder.id,
     createdAt: new Date().toISOString(),
   };
+
+  // before the update we have to fill the order
 
   //upddate the in memory ORDERBOOK
   currentPriceLevel["totalQuantity"] += quantity;

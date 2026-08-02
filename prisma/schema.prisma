@@ -48,6 +48,7 @@ model Fill {
   price       Int
   buyorderid  Int
   sellorderid Int
+  quantity    Int
   stock       Stock @relation(fields: [stockid], references: [id])
   buyorders   Order @relation("Buyorders", fields: [buyorderid], references: [id])
   sellordes   Order @relation("Sellorders", fields: [sellorderid], references: [id])
