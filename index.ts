@@ -279,6 +279,19 @@ app.post("/order", authMiddleware, async (req, res) => {
   const quantity = req.body.quantity;
   const status = req.body.status;
   const filledquantity = req.body.filledquantity;
+  let finalPrice = null
+
+  if(type === "LIMIT"){
+    if (!price) { 
+      return res.json({
+        msg : " The LIMIT order must include a PRICE"
+      })
+    }
+    finalPrice = price
+  }
+  else if(type === "MARKET"){ 
+    finalPrice = null
+  }
 
   if (!userId) {
     return res.status(400).json({ msg: "Unauthorised" });
@@ -313,7 +326,7 @@ app.post("/order", authMiddleware, async (req, res) => {
       side: side,
       type: type,
       stockid: stockid,
-      price: price,
+      price: finalPrice,
       quantity: quantity,
       status: status,
       filledquantity: filledquantity,
@@ -408,6 +421,7 @@ app.post("/order", authMiddleware, async (req, res) => {
         const currentavailableOrderQuantity =
           currentOrder!.quantity - currentOrder!.filledQuantity;
         if (remainingquantity >= currentavailableOrderQuantity) {
+          // the order is completely filled
           remainingquantity -= currentavailableOrderQuantity;
           currentpricelevel!.totalQuantity -= currentavailableOrderQuantity;
           currentpricelevel!.orders.shift();
@@ -429,7 +443,7 @@ app.post("/order", authMiddleware, async (req, res) => {
 
   // 6. Update the in-memory Order Book with the new order.
   const newOrder = {
-    userId: userId,
+    userId: userId, 
     quantity,
     filledQuantity: filledquantity,
     orderId: createdOrder.id,
