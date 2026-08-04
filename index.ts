@@ -47,7 +47,7 @@ interface OrderBook {
 const ORDERBOOK: Record<number, OrderBook> = {
   1: {
     BIDS: {
-      // Someone wants to BUY at a price of 145.50
+      // Highest Bid (Best price for a seller to hit)
       145.5: {
         totalQuantity: 10,
         orders: [
@@ -60,17 +60,68 @@ const ORDERBOOK: Record<number, OrderBook> = {
           },
         ],
       },
+      // Lower Bids
+      145.0: {
+        totalQuantity: 15,
+        orders: [
+          {
+            userId: 3,
+            quantity: 15,
+            filledQuantity: 0,
+            orderId: 103,
+            createdAt: "2026-07-28 2305",
+          },
+        ],
+      },
+      144.5: {
+        totalQuantity: 50,
+        orders: [
+          {
+            userId: 4,
+            quantity: 50,
+            filledQuantity: 0,
+            orderId: 104,
+            createdAt: "2026-07-28 2310",
+          },
+        ],
+      },
     },
     ASKS: {
+      // Lowest Ask (Best price for a buyer to hit)
       150.0: {
         totalQuantity: 25,
         orders: [
           {
             userId: 2,
-            quantity: 20,
+            quantity: 25,
             filledQuantity: 0,
             orderId: 102,
             createdAt: "2026-07-28 2300",
+          },
+        ],
+      },
+      // Higher Asks
+      150.5: {
+        totalQuantity: 12,
+        orders: [
+          {
+            userId: 5,
+            quantity: 12,
+            filledQuantity: 0,
+            orderId: 105,
+            createdAt: "2026-07-28 2315",
+          },
+        ],
+      },
+      151.0: {
+        totalQuantity: 100,
+        orders: [
+          {
+            userId: 6,
+            quantity: 100,
+            filledQuantity: 0,
+            orderId: 106,
+            createdAt: "2026-07-28 2320",
           },
         ],
       },
@@ -336,7 +387,42 @@ app.post("/order", authMiddleware, async (req, res) => {
         delete stockAsks[lowestAskPrice];
       }
     }
-    
+  }
+
+  if (otype == "ASKS" && mtype == "MARKET") {
+    const StockBids = ORDERBOOK[stockid]["BIDS"];
+    const priceStrings = Object.keys(StockBids);
+    if (priceStrings.length == 0) {
+      return res.json({
+        msg: "There is no BIDS fro the ASK that you made",
+      });
+    }
+    let priceNumbers = priceStrings.map((p) => Number(p));
+    let remainingquantity = quantity;
+    while (priceNumbers.length > 0 && remainingquantity > 0) {
+      const highestBidPrice = Math.max(...priceNumbers);
+      const currentpricelevel = ORDERBOOK[stockid]["BIDS"][highestBidPrice];
+      //individual Order Level
+      while (remainingquantity > 0 && currentpricelevel!.orders.length > 0) {
+        const currentOrder = currentpricelevel!.orders[0];
+        const currentavailableOrderQuantity =
+          currentOrder!.quantity - currentOrder!.filledQuantity;
+        if (remainingquantity >= currentavailableOrderQuantity) {
+          remainingquantity -= currentavailableOrderQuantity;
+          currentpricelevel!.totalQuantity -= currentavailableOrderQuantity;
+          currentpricelevel!.orders.shift();
+        } else {
+          // the order should Be partially filled
+          currentOrder!.filledQuantity += remainingquantity;
+          currentpricelevel!.totalQuantity -= remainingquantity;
+          remainingquantity = 0;
+        }
+      }
+      if (currentpricelevel!.orders.length === 0) {
+        priceNumbers = priceNumbers.filter((p) => p !== highestBidPrice);
+        delete ORDERBOOK[stockid]["BIDS"][highestBidPrice];
+      }
+    }
   }
 
   const currentPriceLevel = ORDERBOOK[stockid][otype][price]!;
