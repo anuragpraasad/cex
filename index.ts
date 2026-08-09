@@ -438,24 +438,54 @@ app.post("/order", authMiddleware, async (req, res) => {
     }
   }
 
-  if (otype == "BIDS" && mtype == "LIMIT") {
-    const StockAsks = ORDERBOOK[stockid]["ASKS"];
-    const priceStrings = Object.keys(StockAsks);
-    if (Object.keys(StockAsks).length == 0) {
-      return res.json({
-        msg: "There is no ASKS for this " + ticker?.title,
-      });
+  if (otype === "BIDS" && mtype === "LIMIT") {
+    const stockAsks = ORDERBOOK[stockid]["ASKS"] || {};
+    let remainingquantity = quantity;
+
+    // --- PHASE 1: MATCHING ---
+    let askPrices = Object.keys(stockAsks)
+      .map(Number)
+      .sort((a, b) => a - b);
+
+    for (const askPrice of askPrices) {
+      if (remainingquantity <= 0) break;
+      // no price match
+      if (askPrice > finalPrice) break;
+
+      const currentPriceLevel = stockAsks[askPrice]!;
+
+      while (remainingquantity > 0 && currentPriceLevel.orders.length > 0) {
+        const currentOrder = currentPriceLevel.orders[0];
+        const currentAvailableQuantity =
+          currentOrder!.quantity - currentOrder!.filledQuantity;
+
+        if (remainingquantity >= currentAvailableQuantity) {
+          // Full Fill 
+          remainingquantity -= currentAvailableQuantity;
+          currentPriceLevel.totalQuantity -= currentAvailableQuantity;
+          currentPriceLevel.orders.shift();
+        } else {
+          // Partial Fill 
+          currentOrder!.filledQuantity += remainingquantity;
+          currentPriceLevel.totalQuantity -= remainingquantity;
+          remainingquantity = 0;
+        }
+      }
+      if (currentPriceLevel.orders.length === 0) {
+        delete ORDERBOOK[stockid]["ASKS"][askPrice];
+      }
     }
-    let priceNumbers = priceStrings.map((p) => Number(p));
-    const isPresent = priceNumbers.includes(finalPrice);
-    if (!isPresent) {
+
+    // --- PHASE 2: RESTING IN THE BOOK ---
+    if (remainingquantity > 0) {
       const newOrder = {
         userId: userId,
-        quantity,
-        filledQuantity: filledquantity,
+        quantity: remainingquantity, // Only store what is left!
+        filledQuantity: 0,
         orderId: createdOrder.id,
         createdAt: new Date().toISOString(),
       };
+
       if (ORDERBOOK[stockid]["BIDS"][finalPrice]) {
         ORDERBOOK[stockid]["BIDS"][finalPrice]!.totalQuantity +=
           newOrder.quantity;
@@ -466,31 +496,69 @@ app.post("/order", authMiddleware, async (req, res) => {
           orders: [newOrder],
         };
       }
-    } else {
-      let remainingquantity = quantity;
-      const currentPriceLevel = ORDERBOOK[stockid]["ASKS"][finalPrice]!;
-      while (
-        currentPriceLevel.totalQuantity >= remainingquantity &&
-        currentPriceLevel.orders.length > 0
-      ) {
-        const currentOrder = currentPriceLevel.orders[0];
-        const currentAvailableQuantity =
-          currentOrder!.quantity - currentOrder!.filledQuantity;
-        if (remainingquantity >= currentAvailableQuantity) {
-          remainingquantity -= currentAvailableQuantity;
-          currentPriceLevel.totalQuantity -= currentAvailableQuantity;
-          currentPriceLevel.orders.shift();
-        } else {
-          currentOrder!.filledQuantity += remainingquantity;
-          currentPriceLevel.totalQuantity -= remainingquantity;
-          remainingquantity = 0;
-        }
-        if (currentPriceLevel.orders.length == 0) {
-          delete ORDERBOOK[stockid]["BIDS"][finalPrice];
-        }
-      }
     }
   }
+  
+  if (otype === "ASKS" && mtype === "LIMIT") {
+  const stockBids = ORDERBOOK[stockid]["BIDS"] || {};
+  let remainingquantity = quantity;
+
+  let bidPrices = Object.keys(stockBids)
+    .map(Number)
+    .sort((a, b) => b - a); 
+
+  for (const bidPrice of bidPrices) {
+    if (remainingquantity <= 0) break;
+
+    if (bidPrice < finalPrice) break;
+
+    const currentPriceLevel = stockBids[bidPrice]!;
+
+    while (remainingquantity > 0 && currentPriceLevel.orders.length > 0) {
+      const currentOrder = currentPriceLevel.orders[0];
+      const currentAvailableQuantity = currentOrder!.quantity - currentOrder!.filledQuantity;
+
+      if (remainingquantity >= currentAvailableQuantity) {
+        // Full Fill 
+        remainingquantity -= currentAvailableQuantity;
+        currentPriceLevel.totalQuantity -= currentAvailableQuantity;
+        currentPriceLevel.orders.shift();
+      } else {
+        // Partial Fill 
+        currentOrder!.filledQuantity += remainingquantity;
+        currentPriceLevel.totalQuantity -= remainingquantity;
+        remainingquantity = 0;
+      }
+    }
+    if (currentPriceLevel.orders.length === 0) {
+      delete ORDERBOOK[stockid]["BIDS"][bidPrice];
+    }
+  }
+
+  // --- PHASE 2: RESTING IN THE BOOK ---
+  // If we couldn't match everything, place the remainder in the ASKS book
+  if (remainingquantity > 0) {
+    const newOrder = {
+      userId: userId,
+      quantity: remainingquantity, // Only store what is left!
+      filledQuantity: 0, 
+      orderId: createdOrder.id,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (ORDERBOOK[stockid]["ASKS"][finalPrice]) {
+      // Add to existing price level
+      ORDERBOOK[stockid]["ASKS"][finalPrice]!.totalQuantity += newOrder.quantity;
+      ORDERBOOK[stockid]["ASKS"][finalPrice]!.orders.push(newOrder);
+    } else {
+      // Create brand new price level
+      ORDERBOOK[stockid]["ASKS"][finalPrice] = {
+        totalQuantity: newOrder.quantity,
+        orders: [newOrder],
+      };
+    }
+  }
+}
 
   // 6. Update the in-memory Order Book with the new order.
 
