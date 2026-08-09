@@ -61,7 +61,7 @@ model Order {
   side           Side
   type           Type
   stockid        Int
-  price          Int
+  price          Int?
   filledquantity Int
   status         Status
   buyFills       Fill[] @relation("Buyorders")

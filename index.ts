@@ -279,18 +279,17 @@ app.post("/order", authMiddleware, async (req, res) => {
   const quantity = req.body.quantity;
   const status = req.body.status;
   const filledquantity = req.body.filledquantity;
-  let finalPrice = null
+  let finalPrice = null;
 
-  if(type === "LIMIT"){
-    if (!price) { 
+  if (type === "LIMIT") {
+    if (!price) {
       return res.json({
-        msg : " The LIMIT order must include a PRICE"
-      })
+        msg: " The LIMIT order must include a PRICE",
+      });
     }
-    finalPrice = price
-  }
-  else if(type === "MARKET"){ 
-    finalPrice = null
+    finalPrice = price;
+  } else if (type === "MARKET") {
+    finalPrice = null;
   }
 
   if (!userId) {
@@ -439,24 +438,63 @@ app.post("/order", authMiddleware, async (req, res) => {
     }
   }
 
-  const currentPriceLevel = ORDERBOOK[stockid][otype][price]!;
+  const currentPriceLevel = ORDERBOOK[stockid][otype][finalPrice]!;
+  if (otype == "BIDS" && mtype == "LIMIT") {
+    const StockAsks = ORDERBOOK[stockid]["ASKS"];
+    const priceStrings = Object.keys(StockAsks);
+    if (Object.keys(StockAsks).length == 0) {
+      return res.json({
+        msg: "There is no ASKS for this " + ticker?.title,
+      });
+    }
+    let priceNumbers = priceStrings.map((p) => Number(p));
+    const isPresent = priceNumbers.includes(finalPrice);
+    if (!isPresent) {
+      const newOrder = {
+        userId: userId,
+        quantity,
+        filledQuantity: filledquantity,
+        orderId: createdOrder.id,
+        createdAt: new Date().toISOString(),
+      };
+      if (ORDERBOOK[stockid]["BIDS"][finalPrice]) {
+        ORDERBOOK[stockid]["BIDS"][finalPrice]!.totalQuantity +=
+          newOrder.quantity;
+        ORDERBOOK[stockid]["BIDS"][finalPrice]!.orders.push(newOrder);
+      } else {
+        ORDERBOOK[stockid]["BIDS"][finalPrice] = {
+          totalQuantity: newOrder.quantity,
+          orders: [newOrder],
+        };
+      }
+    } else {
+      let remainingquantity = quantity;
+      while (
+        currentPriceLevel.totalQuantity >= remainingquantity &&
+        currentPriceLevel.orders.length > 0
+      ) {
+        const currentOrder = currentPriceLevel.orders[0];
+        const currentAvailableQuantity =
+          currentOrder!.quantity - currentOrder!.filledQuantity;
+        if ( remainingquantity >= currentAvailableQuantity) { 
+          remainingquantity -= currentAvailableQuantity
+          currentPriceLevel.totalQuantity -= currentAvailableQuantity
+          currentPriceLevel.orders.shift()
+        }
+        else { 
+          currentOrder!.filledQuantity += remainingquantity
+          currentPriceLevel.totalQuantity -=  remainingquantity
+          remainingquantity = 0 
+        }
+      }
+    }
+  }
 
   // 6. Update the in-memory Order Book with the new order.
-  const newOrder = {
-    userId: userId, 
-    quantity,
-    filledQuantity: filledquantity,
-    orderId: createdOrder.id,
-    createdAt: new Date().toISOString(),
-  };
 
   // before the update we have to fill the order
 
   //upddate the in memory ORDERBOOK
-  currentPriceLevel["totalQuantity"] += quantity;
-  currentPriceLevel.orders.push(newOrder);
-  console.log(createdOrder);
-  console.log("Updated the ORDERBOOK");
 
   // 7. Return a success response to the client.
   res.status(200).json({ msg: "order created" });
