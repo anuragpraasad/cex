@@ -438,7 +438,6 @@ app.post("/order", authMiddleware, async (req, res) => {
     }
   }
 
-  const currentPriceLevel = ORDERBOOK[stockid][otype][finalPrice]!;
   if (otype == "BIDS" && mtype == "LIMIT") {
     const StockAsks = ORDERBOOK[stockid]["ASKS"];
     const priceStrings = Object.keys(StockAsks);
@@ -469,6 +468,7 @@ app.post("/order", authMiddleware, async (req, res) => {
       }
     } else {
       let remainingquantity = quantity;
+      const currentPriceLevel = ORDERBOOK[stockid]["ASKS"][finalPrice]!;
       while (
         currentPriceLevel.totalQuantity >= remainingquantity &&
         currentPriceLevel.orders.length > 0
@@ -476,15 +476,17 @@ app.post("/order", authMiddleware, async (req, res) => {
         const currentOrder = currentPriceLevel.orders[0];
         const currentAvailableQuantity =
           currentOrder!.quantity - currentOrder!.filledQuantity;
-        if ( remainingquantity >= currentAvailableQuantity) { 
-          remainingquantity -= currentAvailableQuantity
-          currentPriceLevel.totalQuantity -= currentAvailableQuantity
-          currentPriceLevel.orders.shift()
+        if (remainingquantity >= currentAvailableQuantity) {
+          remainingquantity -= currentAvailableQuantity;
+          currentPriceLevel.totalQuantity -= currentAvailableQuantity;
+          currentPriceLevel.orders.shift();
+        } else {
+          currentOrder!.filledQuantity += remainingquantity;
+          currentPriceLevel.totalQuantity -= remainingquantity;
+          remainingquantity = 0;
         }
-        else { 
-          currentOrder!.filledQuantity += remainingquantity
-          currentPriceLevel.totalQuantity -=  remainingquantity
-          remainingquantity = 0 
+        if (currentPriceLevel.orders.length == 0) {
+          delete ORDERBOOK[stockid]["BIDS"][finalPrice];
         }
       }
     }
