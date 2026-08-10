@@ -125,6 +125,14 @@ app.post("/post-stock", async (req, res) => {
   }
 });
 
+app.get("/showfilledtable", async ( req, res) => {
+  const filledtable = await prisma.fill.findMany()
+  console.log(filledtable)
+  return res.json({
+    msg : filledtable
+  })
+})
+
 /**
  * ORDER CREATION ENDPOINT
  *
@@ -254,11 +262,31 @@ app.post("/order", authMiddleware, async (req, res) => {
           // full order fill
           remainingquantity -= availableOrderQuantity;
           currentpricelevel!.totalQuantity -= availableOrderQuantity;
+          const filledOrder = await prisma.fill.create({
+            data : {
+              stockid,
+              price : lowestAskPrice,
+              buyorderid : userId,
+              sellorderid : currentorder!.userId,
+              quantity : availableOrderQuantity
+            }
+          })
+          console.log(filledOrder)
           currentpricelevel!.orders.shift();
         } else {
           //partial order fill
           currentorder!.filledQuantity += remainingquantity;
           currentpricelevel!.totalQuantity -= remainingquantity;
+          const filledOrder = await prisma.fill.create({
+            data : {
+              stockid,
+              price : lowestAskPrice,
+              buyorderid : userId,
+              sellorderid : currentorder!.userId,
+              quantity : remainingquantity
+            }
+          })
+          console.log(filledOrder)
           remainingquantity = 0;
         }
       }
