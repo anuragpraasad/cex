@@ -3,8 +3,15 @@ import { PrismaClient } from "./generated/prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import authMiddleware from "./middleware";
 import jwt from "jsonwebtoken";
-import {ORDERBOOK} from "./orderbook"
-import {BALANCES} from "./balances"
+import { ORDERBOOK } from "./orderbook";
+import { BALANCES } from "./balances";
+import { createClient } from "redis";
+
+// Create the client (defaults to localhost:6379)
+const redisClient = createClient({
+  url: "rediss://default:gQAAAAAAAqHDAAIgcDExOGRiYzUyNGVlZDg0ZDEyOGE5OTEyZjlmNGRlNTJkZA@proper-chamois-172483.upstash.io:6379",
+});
+await redisClient.connect();
 
 const adapter = new PrismaPg({
   connectionString: process.env.DATABASE_URL!,
@@ -14,8 +21,6 @@ const prisma = new PrismaClient({ adapter });
 
 const app = express();
 app.use(express.json());
-
-
 
 app.get("/getorderbook", (req, res) => {
   return res.json({
@@ -125,13 +130,13 @@ app.post("/post-stock", async (req, res) => {
   }
 });
 
-app.get("/showfilledtable", async ( req, res) => {
-  const filledtable = await prisma.fill.findMany()
-  console.log(filledtable)
+app.get("/showfilledtable", async (req, res) => {
+  const filledtable = await prisma.fill.findMany();
+  console.log(filledtable);
   return res.json({
-    msg : filledtable
-  })
-})
+    msg: filledtable,
+  });
+});
 
 /**
  * ORDER CREATION ENDPOINT
@@ -194,19 +199,25 @@ app.post("/order", authMiddleware, async (req, res) => {
   // -------------------------------------------------------------------------------------------
 
   // update the order db
-  // 3. Persist the new order record in the database.
+  // 3. Persist the new order record in the database.\
+  const newOrder = {
+    userId: userId,
+    side: side,
+    type: type,
+    stockid: stockid,
+    price: finalPrice,
+    quantity: quantity,
+    status: status,
+    filledquantity: filledquantity,
+  };
   const createdOrder = await prisma.order.create({
-    data: {
-      userId: userId,
-      side: side,
-      type: type,
-      stockid: stockid,
-      price: finalPrice,
-      quantity: quantity,
-      status: status,
-      filledquantity: filledquantity,
-    },
+    data: newOrder,
   });
+  const redispush = await redisClient.rPush(
+    "ORDER_QUEUE",
+    JSON.stringify(newOrder),
+  );
+  console.log(redispush);
 
   // update the In memory Order Book
   // 4. Fetch stock metadata from the database.
@@ -239,74 +250,93 @@ app.post("/order", authMiddleware, async (req, res) => {
       orders: [],
     };
   }
+  const stockAsks = ORDERBOOK[stockid]["ASKS"];
+  if (Object.keys(stockAsks).length == 0) {
+    return res.json({
+      msg: "There is no ASKS for this " + ticker?.title,
+    });
+  }
+  const stockBids = ORDERBOOK[stockid]["BIDS"];
+  if (Object.keys(stockBids).length == 0) {
+    return res.json({
+      msg: "There is no BIDS available for the " + ticker?.title,
+    });
+  }
 
-  if (otype == "BIDS" && mtype == "MARKET") {
-    const stockAsks = ORDERBOOK[stockid]["ASKS"];
-    if (Object.keys(stockAsks).length == 0) {
-      return res.json({
-        msg: "There is no ASKS for this " + ticker?.title,
-      });
-    }
-    const priceStrings = Object.keys(stockAsks);
-    let priceNumbers = priceStrings.map((price) => Number(price));
-    let remainingquantity = quantity; // quantity that the BIDS is wanting to sell
-    while (remainingquantity > 0 && priceNumbers.length > 0) {
-      const lowestAskPrice = Math.min(...priceNumbers);
-      const currentpricelevel = stockAsks[lowestAskPrice];
-      // individual order level
-      while (remainingquantity > 0 && currentpricelevel!.orders.length > 0) {
-        let currentorder = currentpricelevel!.orders[0];
+  if (otype === "BIDS" && mtype === "MARKET") {
+    const sortedPrices = Object.keys(stockAsks)
+      .map(Number)
+      .sort((a, b) => a - b);
+
+    let remainingquantity = quantity; // quantity that the user wants to BUY
+    let filledQuantity = 0;
+
+    
+    for (const currentPrice of sortedPrices) {
+      if (remainingquantity === 0) break;
+
+      const currentpricelevel = stockAsks[currentPrice];
+      if (!currentpricelevel) continue;
+
+      // 3. Process individual orders at this specific price level
+      while (remainingquantity > 0 && currentpricelevel.orders.length > 0) {
+        let currentorder = currentpricelevel.orders[0];
         let availableOrderQuantity =
           currentorder!.quantity - currentorder!.filledQuantity;
+
         if (remainingquantity >= availableOrderQuantity) {
-          // full order fill
+          // --- FULL ORDER FILL ---
           remainingquantity -= availableOrderQuantity;
-          currentpricelevel!.totalQuantity -= availableOrderQuantity;
+          filledQuantity += availableOrderQuantity;
+          currentpricelevel.totalQuantity -= availableOrderQuantity;
+
           const filledOrder = await prisma.fill.create({
-            data : {
+            data: {
               stockid,
-              price : lowestAskPrice,
-              buyorderid : userId,
-              sellorderid : currentorder!.userId,
-              quantity : availableOrderQuantity
-            }
-          })
-          console.log(filledOrder)
-          currentpricelevel!.orders.shift();
+              price: currentPrice, // Safely locked to the current loop's price
+              buyorderid: userId, // MAKE SURE you generate/pass an OrderId here!
+              sellorderid: currentorder!.orderId, // FIXED: Now using orderId instead of userId
+              quantity: availableOrderQuantity,
+            },
+          });
+          console.log(filledOrder);
+          currentpricelevel.orders.shift();
         } else {
-          //partial order fill
+          // --- PARTIAL ORDER FILL ---
           currentorder!.filledQuantity += remainingquantity;
-          currentpricelevel!.totalQuantity -= remainingquantity;
+          currentpricelevel.totalQuantity -= remainingquantity;
+          filledQuantity += remainingquantity;
+
           const filledOrder = await prisma.fill.create({
-            data : {
+            data: {
               stockid,
-              price : lowestAskPrice,
-              buyorderid : userId,
-              sellorderid : currentorder!.userId,
-              quantity : remainingquantity
-            }
-          })
-          console.log(filledOrder)
+              price: currentPrice,
+              buyorderid: userId,
+              sellorderid: currentorder!.orderId,
+              quantity: remainingquantity,
+            },
+          });
+          console.log(filledOrder);
+
           remainingquantity = 0;
         }
       }
-      if (currentpricelevel!.orders.length === 0) {
-        priceNumbers = priceNumbers.filter((p) => p !== lowestAskPrice);
-        delete stockAsks[lowestAskPrice];
+      if (currentpricelevel.orders.length === 0) {
+        delete stockAsks[currentPrice];
       }
     }
+    return res.json({
+      msg: "Order has been created",
+      filledQuantity: filledQuantity,
+    });
   }
 
   if (otype == "ASKS" && mtype == "MARKET") {
     const StockBids = ORDERBOOK[stockid]["BIDS"];
     const priceStrings = Object.keys(StockBids);
-    if (priceStrings.length == 0) {
-      return res.json({
-        msg: "There is no BIDS fro the ASK that you made",
-      });
-    }
     let priceNumbers = priceStrings.map((p) => Number(p));
     let remainingquantity = quantity;
+    let filledQuantity = 0;
     while (priceNumbers.length > 0 && remainingquantity > 0) {
       const highestBidPrice = Math.max(...priceNumbers);
       const currentpricelevel = ORDERBOOK[stockid]["BIDS"][highestBidPrice];
@@ -318,12 +348,34 @@ app.post("/order", authMiddleware, async (req, res) => {
         if (remainingquantity >= currentavailableOrderQuantity) {
           // the order is completely filled
           remainingquantity -= currentavailableOrderQuantity;
+          filledQuantity += currentavailableOrderQuantity;
           currentpricelevel!.totalQuantity -= currentavailableOrderQuantity;
+          const filledOrder = await prisma.fill.create({
+            data: {
+              stockid,
+              price: highestBidPrice,
+              buyorderid: userId,
+              sellorderid: currentOrder!.userId,
+              quantity: currentavailableOrderQuantity,
+            },
+          });
+          console.log(filledOrder);
           currentpricelevel!.orders.shift();
         } else {
           // the order should Be partially filled
           currentOrder!.filledQuantity += remainingquantity;
           currentpricelevel!.totalQuantity -= remainingquantity;
+          filledQuantity += remainingquantity;
+          const filledOrder = await prisma.fill.create({
+            data: {
+              stockid,
+              price: highestBidPrice,
+              buyorderid: userId,
+              sellorderid: currentOrder!.userId,
+              quantity: remainingquantity,
+            },
+          });
+          console.log(filledOrder);
           remainingquantity = 0;
         }
       }
@@ -332,6 +384,10 @@ app.post("/order", authMiddleware, async (req, res) => {
         delete ORDERBOOK[stockid]["BIDS"][highestBidPrice];
       }
     }
+    return res.json({
+      msg: "Order has been created",
+      filledQuantity: filledQuantity,
+    });
   }
 
   if (otype === "BIDS" && mtype === "LIMIT") {
@@ -342,6 +398,7 @@ app.post("/order", authMiddleware, async (req, res) => {
     let askPrices = Object.keys(stockAsks)
       .map(Number)
       .sort((a, b) => a - b);
+    let filledQuantity = 0;
 
     for (const askPrice of askPrices) {
       if (remainingquantity <= 0) break;
@@ -349,21 +406,32 @@ app.post("/order", authMiddleware, async (req, res) => {
       if (askPrice > finalPrice) break;
 
       const currentPriceLevel = stockAsks[askPrice]!;
-
       while (remainingquantity > 0 && currentPriceLevel.orders.length > 0) {
         const currentOrder = currentPriceLevel.orders[0];
         const currentAvailableQuantity =
           currentOrder!.quantity - currentOrder!.filledQuantity;
 
         if (remainingquantity >= currentAvailableQuantity) {
-          // Full Fill 
+          // Full Fill
           remainingquantity -= currentAvailableQuantity;
           currentPriceLevel.totalQuantity -= currentAvailableQuantity;
+          filledQuantity += currentAvailableQuantity;
+          const filledOrder = await prisma.fill.create({
+            data: {
+              stockid,
+              price: askPrice,
+              buyorderid: userId,
+              sellorderid: currentOrder!.userId,
+              quantity: currentAvailableQuantity,
+            },
+          });
+          console.log(filledOrder);
           currentPriceLevel.orders.shift();
         } else {
-          // Partial Fill 
+          // Partial Fill
           currentOrder!.filledQuantity += remainingquantity;
           currentPriceLevel.totalQuantity -= remainingquantity;
+          filledQuantity += remainingquantity;
           remainingquantity = 0;
         }
       }
@@ -393,68 +461,80 @@ app.post("/order", authMiddleware, async (req, res) => {
         };
       }
     }
+    return res.json({
+      msg: "Order has been created",
+      filledQuantity: filledQuantity,
+    });
   }
-  
+
   if (otype === "ASKS" && mtype === "LIMIT") {
-  const stockBids = ORDERBOOK[stockid]["BIDS"] || {};
-  let remainingquantity = quantity;
+    const stockBids = ORDERBOOK[stockid]["BIDS"] || {};
+    let remainingquantity = quantity;
+    let filledQuantity = 0;
+    let bidPrices = Object.keys(stockBids)
+      .map(Number)
+      .sort((a, b) => b - a);
 
-  let bidPrices = Object.keys(stockBids)
-    .map(Number)
-    .sort((a, b) => b - a); 
+    for (const bidPrice of bidPrices) {
+      if (remainingquantity <= 0) break;
 
-  for (const bidPrice of bidPrices) {
-    if (remainingquantity <= 0) break;
+      if (bidPrice < finalPrice) break;
 
-    if (bidPrice < finalPrice) break;
+      const currentPriceLevel = stockBids[bidPrice]!;
 
-    const currentPriceLevel = stockBids[bidPrice]!;
+      while (remainingquantity > 0 && currentPriceLevel.orders.length > 0) {
+        const currentOrder = currentPriceLevel.orders[0];
+        const currentAvailableQuantity =
+          currentOrder!.quantity - currentOrder!.filledQuantity;
 
-    while (remainingquantity > 0 && currentPriceLevel.orders.length > 0) {
-      const currentOrder = currentPriceLevel.orders[0];
-      const currentAvailableQuantity = currentOrder!.quantity - currentOrder!.filledQuantity;
-
-      if (remainingquantity >= currentAvailableQuantity) {
-        // Full Fill 
-        remainingquantity -= currentAvailableQuantity;
-        currentPriceLevel.totalQuantity -= currentAvailableQuantity;
-        currentPriceLevel.orders.shift();
-      } else {
-        // Partial Fill 
-        currentOrder!.filledQuantity += remainingquantity;
-        currentPriceLevel.totalQuantity -= remainingquantity;
-        remainingquantity = 0;
+        if (remainingquantity >= currentAvailableQuantity) {
+          // Full Fill
+          remainingquantity -= currentAvailableQuantity;
+          currentPriceLevel.totalQuantity -= currentAvailableQuantity;
+          filledQuantity += currentAvailableQuantity;
+          currentPriceLevel.orders.shift();
+        } else {
+          // Partial Fill
+          currentOrder!.filledQuantity += remainingquantity;
+          currentPriceLevel.totalQuantity -= remainingquantity;
+          filledQuantity += remainingquantity;
+          remainingquantity = 0;
+        }
+      }
+      if (currentPriceLevel.orders.length === 0) {
+        delete ORDERBOOK[stockid]["BIDS"][bidPrice];
       }
     }
-    if (currentPriceLevel.orders.length === 0) {
-      delete ORDERBOOK[stockid]["BIDS"][bidPrice];
-    }
-  }
 
-  // --- PHASE 2: RESTING IN THE BOOK ---
-  // If we couldn't match everything, place the remainder in the ASKS book
-  if (remainingquantity > 0) {
-    const newOrder = {
-      userId: userId,
-      quantity: remainingquantity, // Only store what is left!
-      filledQuantity: 0, 
-      orderId: createdOrder.id,
-      createdAt: new Date().toISOString(),
-    };
-
-    if (ORDERBOOK[stockid]["ASKS"][finalPrice]) {
-      // Add to existing price level
-      ORDERBOOK[stockid]["ASKS"][finalPrice]!.totalQuantity += newOrder.quantity;
-      ORDERBOOK[stockid]["ASKS"][finalPrice]!.orders.push(newOrder);
-    } else {
-      // Create brand new price level
-      ORDERBOOK[stockid]["ASKS"][finalPrice] = {
-        totalQuantity: newOrder.quantity,
-        orders: [newOrder],
+    // --- PHASE 2: RESTING IN THE BOOK ---
+    // If we couldn't match everything, place the remainder in the ASKS book
+    if (remainingquantity > 0) {
+      const newOrder = {
+        userId: userId,
+        quantity: remainingquantity, // Only store what is left!
+        filledQuantity: 0,
+        orderId: createdOrder.id,
+        createdAt: new Date().toISOString(),
       };
+
+      if (ORDERBOOK[stockid]["ASKS"][finalPrice]) {
+        // Add to existing price level
+        ORDERBOOK[stockid]["ASKS"][finalPrice]!.totalQuantity +=
+          newOrder.quantity;
+        ORDERBOOK[stockid]["ASKS"][finalPrice]!.orders.push(newOrder);
+      } else {
+        // Create brand new price level
+        ORDERBOOK[stockid]["ASKS"][finalPrice] = {
+          totalQuantity: newOrder.quantity,
+          orders: [newOrder],
+        };
+      }
     }
+    return res.json({
+      msg: "Order has been created",
+      filledQuantity: filledQuantity,
+    });
   }
-}
 
   // 6. Update the in-memory Order Book with the new order.
 
